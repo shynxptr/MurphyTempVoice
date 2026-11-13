@@ -1,0 +1,20 @@
+{
+  "name": "murphy-temp-voice",
+  "version": "1.0.0",
+  "description": "Murphy Temp Voice Discord bot with TempVoice-style interface and AFK/Music bot keep-alive support",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "sync-emojis": "node src/scripts/syncEmojis.js",
+    "check": "node --check src/index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  }
+}
+
