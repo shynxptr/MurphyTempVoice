@@ -19,6 +19,7 @@ import {
 
 const pendingDeletions = new Map();
 const createCooldowns = new Map();
+const inFlightJoins = new Set();
 const renameTimestamps = new Map();
 
 export function getEffectiveStayBotIds(guildCfg) {
@@ -221,89 +222,117 @@ function formatChannelName(template, member) {
 }
 
 async function handleJoinToCreate(newState, guildCfg) {
-  const member = newState.member;
   const guild = newState.guild;
+  const member =
+    newState.member ??
+    (newState.id ? await guild.members.fetch(newState.id).catch(() => null) : null);
   if (!member || member.user.bot) return;
+
+  const inFlightKey = `${guild.id}:${member.id}`;
+  if (inFlightJoins.has(inFlightKey)) return;
 
   const cooldownMs = config.createCooldownSeconds * 1000;
   const lastCreate = createCooldowns.get(member.id) ?? 0;
-  if (Date.now() - lastCreate < cooldownMs) return;
+  if (Date.now() - lastCreate < cooldownMs) {
+    console.log(`[VoiceManager] Cooldown active for ${member.user.tag} in ${guild.name}`);
+    return;
+  }
+
+  inFlightJoins.add(inFlightKey);
   createCooldowns.set(member.id, Date.now());
 
-  const triggerChannel = newState.channel;
-  const parentId = guildCfg.categoryId || triggerChannel?.parentId || null;
+  try {
+    const triggerChannel = newState.channel;
+    const triggerId = newState.channelId;
+    const parentId = guildCfg.categoryId || triggerChannel?.parentId || null;
 
-  const permissionOverwrites = [
-    {
-      id: guild.members.me.id,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.Connect,
-        PermissionFlagsBits.Speak,
-        PermissionFlagsBits.ManageChannels,
-        PermissionFlagsBits.MoveMembers,
-      ],
-    },
-    {
-      id: member.id,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.Connect,
-        PermissionFlagsBits.Speak,
-        PermissionFlagsBits.MoveMembers,
-        PermissionFlagsBits.MuteMembers,
-        PermissionFlagsBits.DeafenMembers,
-      ],
-    },
-  ];
-
-  const stayBotIds = getEffectiveStayBotIds(guildCfg);
-  for (const botId of stayBotIds) {
-    const botMember = await guild.members.fetch(botId).catch(() => null);
-    if (botMember) {
-      permissionOverwrites.push({
-        id: botId,
+    const permissionOverwrites = [
+      {
+        id: guild.members.me.id,
         allow: [
           PermissionFlagsBits.ViewChannel,
           PermissionFlagsBits.Connect,
           PermissionFlagsBits.Speak,
+          PermissionFlagsBits.ManageChannels,
+          PermissionFlagsBits.MoveMembers,
         ],
-      });
+      },
+      {
+        id: member.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.Connect,
+          PermissionFlagsBits.Speak,
+          PermissionFlagsBits.MoveMembers,
+          PermissionFlagsBits.MuteMembers,
+          PermissionFlagsBits.DeafenMembers,
+        ],
+      },
+    ];
+
+    const stayBotIds = [...getEffectiveStayBotIds(guildCfg)];
+    const botMembers = await Promise.all(
+      stayBotIds.map(
+        (botId) => guild.members.cache.get(botId) ?? guild.members.fetch(botId).catch(() => null)
+      )
+    );
+    for (const botMember of botMembers) {
+      if (botMember) {
+        permissionOverwrites.push({
+          id: botMember.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.Connect,
+            PermissionFlagsBits.Speak,
+          ],
+        });
+      }
     }
-  }
 
-  const createdChannel = await guild.channels.create({
-    name: formatChannelName(guildCfg.defaultNameTemplate, member),
-    type: ChannelType.GuildVoice,
-    parent: parentId,
-    permissionOverwrites,
-  });
+    const createdChannel = await guild.channels.create({
+      name: formatChannelName(guildCfg.defaultNameTemplate, member),
+      type: ChannelType.GuildVoice,
+      parent: parentId,
+      permissionOverwrites,
+    });
 
-  const record = {
-    channelId: createdChannel.id,
-    guildId: guild.id,
-    ownerId: member.id,
-    createdAt: Date.now(),
-    waitingRoomId: null,
-    textChatId: null,
-    locked: false,
-    hidden: false,
-    chatOpen: false,
-    trustedIds: [],
-    blockedIds: [],
-  };
+    const record = {
+      channelId: createdChannel.id,
+      guildId: guild.id,
+      ownerId: member.id,
+      createdAt: Date.now(),
+      waitingRoomId: null,
+      textChatId: null,
+      locked: false,
+      hidden: false,
+      chatOpen: false,
+      trustedIds: [],
+      blockedIds: [],
+    };
 
-  await upsertTempChannel(record);
+    await upsertTempChannel(record);
 
-  try {
-    if (member.voice?.channelId) {
-      await member.voice.setChannel(createdChannel, 'Moved to Murphy Temp Voice');
-    } else {
-      scheduleEmptyCheck(guild, createdChannel.id);
+    try {
+      const currentVoiceId = member.voice?.channelId ?? triggerId;
+      if (currentVoiceId === triggerId) {
+        await member.voice.setChannel(createdChannel, 'Moved to Murphy Temp Voice');
+        console.log(`[VoiceManager] Created "${createdChannel.name}" and moved ${member.user.tag}`);
+      } else if (createdChannel.members.size === 0) {
+        await deleteTempChannel(guild, createdChannel.id, 'Member left Join-to-Create before move');
+      }
+    } catch (err) {
+      console.error(
+        `[VoiceManager] Failed to move ${member.user.tag} from "${triggerChannel?.name ?? triggerId}" to "${createdChannel.name}" (check MoveMembers & Connect permissions):`,
+        err.message
+      );
+      if (createdChannel.members.size === 0) {
+        await deleteTempChannel(guild, createdChannel.id, 'Failed to move member to new TempVoice');
+      } else {
+        scheduleEmptyCheck(guild, createdChannel.id);
+      }
     }
-  } catch (err) {
-    console.warn('[VoiceManager] Failed to move member to new TempVoice:', err.message);
-    scheduleEmptyCheck(guild, createdChannel.id);
+  } finally {
+    inFlightJoins.delete(inFlightKey);
   }
 }
 

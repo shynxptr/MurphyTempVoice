@@ -212,7 +212,42 @@ async function handleSetup(interaction) {
       name: '➕ Join to Create',
       type: ChannelType.GuildVoice,
       parent: category.id,
+      permissionOverwrites: [
+        {
+          id: guild.members.me.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.Connect,
+            PermissionFlagsBits.ManageChannels,
+            PermissionFlagsBits.MoveMembers,
+          ],
+        },
+      ],
     });
+  }
+
+  const requiredPerms = [
+    ['ViewChannel', PermissionFlagsBits.ViewChannel],
+    ['Connect', PermissionFlagsBits.Connect],
+    ['ManageChannels', PermissionFlagsBits.ManageChannels],
+    ['MoveMembers', PermissionFlagsBits.MoveMembers],
+  ];
+  const me = guild.members.me;
+  const joinPerms = joinCh.permissionsFor(me);
+  const catPerms = category.permissionsFor(me);
+  const missingJoin = requiredPerms
+    .filter(([, flag]) => !joinPerms?.has(flag))
+    .map(([label]) => label);
+  const missingCat = requiredPerms
+    .filter(([, flag]) => !catPerms?.has(flag))
+    .map(([label]) => label);
+
+  const permWarnings = [];
+  if (missingJoin.length) {
+    permWarnings.push(`⚠️ Bot missing permissions in <#${joinCh.id}>: **${missingJoin.join(', ')}**`);
+  }
+  if (missingCat.length) {
+    permWarnings.push(`⚠️ Bot missing permissions in category <#${category.id}>: **${missingCat.join(', ')}**`);
   }
 
   const payload = buildInterfacePayload(guild);
@@ -232,6 +267,7 @@ async function handleSetup(interaction) {
       `• Interface: <#${interfaceCh.id}>\n` +
       `• Join to Create: <#${joinCh.id}>\n` +
       `• Grace period when empty: **${config.emptyGraceSeconds}s**\n\n` +
+      (permWarnings.length ? `${permWarnings.join('\n')}\n\n` : '') +
       `Use \`/afk-bots add\` (or \`STAY_BOT_IDS\` in \`.env\`) to whitelist your Murphy Music/AFK bot.`
   );
 }
